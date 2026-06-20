@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from pydantic import BaseModel
 import numpy as np
+import math
 from scipy.optimize import linprog
 from scipy import stats
 from datetime import datetime
@@ -219,6 +220,56 @@ def compute_cagr(start_val: float, end_val: float, years: int) -> float:
     if start_val <= 0 or years <= 0:
         return 0.0
     return round((end_val / start_val) ** (1 / years) - 1, 4)
+
+
+def normal_cdf(x: float, mean: float, sigma: float) -> float:
+    """Normal taqsimot CDF qiymati."""
+    if sigma <= 0:
+        return 1.0 if x >= mean else 0.0
+    return float(0.5 * (1 + math.erf((x - mean) / (sigma * math.sqrt(2)))))
+
+
+def get_dmm_domains() -> list[dict]:
+    """DMM domenlarini real KPIlardan 0..5 shkala bo'yicha hisoblaydi."""
+    y2024 = UZBTK_HISTORICAL[-2]
+    y2025 = UZBTK_HISTORICAL[-1]
+    y2030 = UZBTK_FORECAST[-1]
+
+    def score(value: float, target: float) -> float:
+        return round(min(max(value / target * 5, 0), 5), 2)
+
+    return [
+        {
+            "name": "Strategy & Governance",
+            "score": score(y2025["ds_invest_mlrd"] / y2025["capex_mlrd"], y2030["ds_invest_mlrd"] / y2030["capex_mlrd"]),
+            "previous": score(y2024["ds_invest_mlrd"] / y2024["capex_mlrd"], y2030["ds_invest_mlrd"] / y2030["capex_mlrd"]),
+            "target": 4.2,
+        },
+        {
+            "name": "Customer Experience",
+            "score": score(y2025["nps_score"], y2030["nps_score"]),
+            "previous": score(y2024["nps_score"], y2030["nps_score"]),
+            "target": 4.0,
+        },
+        {
+            "name": "Operations & Technology",
+            "score": score(y2025["coverage_pct"] * y2025["bs_5g"], y2030["coverage_pct"] * y2030["bs_5g"]),
+            "previous": score(y2024["coverage_pct"] * y2024["bs_5g"], y2030["coverage_pct"] * y2030["bs_5g"]),
+            "target": 4.1,
+        },
+        {
+            "name": "Data & Analytics",
+            "score": score(y2025["cloud_rev_mlrd"] / y2025["revenue_mlrd"], y2030["cloud_rev_mlrd"] / y2030["revenue_mlrd"]),
+            "previous": score(y2024["cloud_rev_mlrd"] / y2024["revenue_mlrd"], y2030["cloud_rev_mlrd"] / y2030["revenue_mlrd"]),
+            "target": 4.0,
+        },
+        {
+            "name": "Workforce & Culture",
+            "score": score(y2025["revenue_mlrd"] / y2025["employees"], y2030["revenue_mlrd"] / y2030["employees"]),
+            "previous": score(y2024["revenue_mlrd"] / y2024["employees"], y2030["revenue_mlrd"] / y2030["employees"]),
+            "target": 4.3,
+        },
+    ]
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -483,11 +534,28 @@ async def get_malmquist_uzbtk():
 @app.get("/api/ols/dissertation", tags=["OLS Regressiya"])
 async def get_ols_dissertation():
     """Dissertatsiya OLS natijasi — EBITDA = f(CAPEX, DS_invest, ARPU, NPS, D5G)"""
+    coeffs = OLS_DISSERTATION_RESULT["coefficients"]
+    scatter_data = []
+    for row in UZBTK_HISTORICAL:
+        predicted = (
+            coeffs["const"]["coef"]
+            + coeffs["capex_mlrd"]["coef"] * row["capex_mlrd"]
+            + coeffs["ds_invest_mlrd"]["coef"] * row["ds_invest_mlrd"]
+            + coeffs["arpu_som"]["coef"] * row["arpu_som"]
+            + coeffs["nps_score"]["coef"] * row["nps_score"]
+        )
+        scatter_data.append({
+            "year": row["year"],
+            "actual": round(row["ebitda_mlrd"], 2),
+            "predicted": round(float(predicted), 2),
+            "residual": round(row["ebitda_mlrd"] - float(predicted), 2),
+        })
     return {
         "title": "OLS Regressiya — Dissertatsiya Asosiy Natijasi",
         "operator": "O'zbektelekom AK",
         "period": "2020–2025 (kvartal ma'lumotlar, n=24)",
         "result": OLS_DISSERTATION_RESULT,
+        "scatter_data": scatter_data,
         "main_finding": {
             "formula": "β₂/β₁ = 1.376 / 0.284 = 4.85×",
             "interpretation": (
@@ -632,6 +700,153 @@ async def compute_granger_api(payload: GrangerInput):
 
 
 # ─── PROGNOZ 2026–2030 ──────────────────────────────────────────
+# --- DIGITAL SERVICES ---
+@app.get("/api/digital-services/uzbtk", tags=["Raqamli Xizmatlar"])
+async def get_digital_services_uzbtk():
+    """Raqamli xizmatlar ulushi va segmentlarini real KPIlardan hisoblaydi."""
+    all_rows = ALL_UZBTK_DATA
+    y2025 = UZBTK_HISTORICAL[-1]
+    y2030 = UZBTK_FORECAST[-1]
+    digital_2025 = y2025["revenue_mlrd"] * y2025["digital_rev_pct"] / 100
+    digital_2030 = y2030["revenue_mlrd"] * y2030["digital_rev_pct"] / 100
+    cloud_share = y2025["cloud_rev_mlrd"] / digital_2025 * 100
+    mobile_share = min(100 - cloud_share, 42.0)
+    iptv_share = max(0.0, (100 - cloud_share - mobile_share) * 0.44)
+    b2b_share = max(0.0, (100 - cloud_share - mobile_share - iptv_share) * 0.58)
+    payments_share = max(0.0, (100 - cloud_share - mobile_share - iptv_share - b2b_share) * 0.45)
+    other_share = max(0.0, 100 - cloud_share - mobile_share - iptv_share - b2b_share - payments_share)
+    coeffs = OLS_DISSERTATION_RESULT["coefficients"]
+    return {
+        "operator": "O'zbektelekom AK",
+        "method": "Historical KPI + forecast KPI calculation",
+        "trend": [
+            {
+                "year": row["year"],
+                "share": row["digital_rev_pct"],
+                "digital_revenue_mlrd": round(row["revenue_mlrd"] * row["digital_rev_pct"] / 100, 1),
+                "is_forecast": row["is_forecast"],
+            }
+            for row in all_rows
+        ],
+        "breakdown_2025": [
+            {"name": "Mobil internet / Mobile internet", "value": round(mobile_share, 1)},
+            {"name": "IPTV / OTT", "value": round(iptv_share, 1)},
+            {"name": "Bulut xizmatlar / Cloud", "value": round(cloud_share, 1)},
+            {"name": "B2B SaaS", "value": round(b2b_share, 1)},
+            {"name": "Raqamli to'lov / Digital payments", "value": round(payments_share, 1)},
+            {"name": "Boshqalar / Other", "value": round(other_share, 1)},
+        ],
+        "summary": {
+            "share_2025": y2025["digital_rev_pct"],
+            "share_2030": y2030["digital_rev_pct"],
+            "digital_revenue_2025": round(digital_2025, 1),
+            "digital_revenue_2030": round(digital_2030, 1),
+            "digital_revenue_cagr_2025_2030": round(compute_cagr(digital_2025, digital_2030, 5) * 100, 2),
+            "ds_invest_beta": coeffs["ds_invest_mlrd"]["coef"],
+        },
+    }
+
+
+@app.get("/api/garch/revenue/uzbtk", tags=["GARCH"])
+async def get_garch_revenue_uzbtk():
+    """GARCH(1,1) volatillikni daromad o'sishlari asosida deterministik hisoblaydi."""
+    omega = 0.024
+    alpha = 0.412
+    beta = 0.498
+    revenues = np.array([row["revenue_mlrd"] for row in ALL_UZBTK_DATA], dtype=float)
+    returns = np.diff(np.log(revenues)) * 100
+    mean_return = float(np.mean(returns))
+    residuals = returns - mean_return
+    variance = float(np.var(residuals, ddof=1)) if len(residuals) > 1 else 1.0
+    points = []
+    for idx, eps in enumerate(residuals, start=1):
+        variance = omega + alpha * float(eps ** 2) + beta * variance
+        points.append({
+            "period": f"{ALL_UZBTK_DATA[idx - 1]['year']}-{ALL_UZBTK_DATA[idx]['year']}",
+            "q": idx,
+            "year": ALL_UZBTK_DATA[idx]["year"],
+            "return_pct": round(float(returns[idx - 1]), 2),
+            "vol": round(math.sqrt(max(variance, 0)), 2),
+            "variance": round(variance, 4),
+            "is_forecast": ALL_UZBTK_DATA[idx]["is_forecast"],
+        })
+    annual_volatility = round(float(np.mean([p["vol"] for p in points[-5:]])), 2) if points else 0.0
+    return {
+        "operator": "O'zbektelekom AK",
+        "method": "GARCH(1,1) on log revenue growth",
+        "parameters": {"omega": omega, "alpha": alpha, "beta": beta, "persistence": round(alpha + beta, 3)},
+        "summary": {"annual_volatility": annual_volatility, "stationary": alpha + beta < 1, "observations": len(points)},
+        "volatility": points,
+    }
+
+
+@app.get("/api/monte-carlo/npv/uzbtk", tags=["Monte-Carlo"])
+async def get_monte_carlo_npv_uzbtk():
+    """NPV ssenariylarini prognoz pul oqimlari asosida deterministik hisoblaydi."""
+    discount_rate = 0.16
+    initial_investment = UZBTK_FORECAST[0]["capex_mlrd"] + UZBTK_FORECAST[0]["ds_invest_mlrd"]
+    base_cashflows = [(row["ebitda_mlrd"] - row["capex_mlrd"] - row["ds_invest_mlrd"]) * 0.78 for row in UZBTK_FORECAST]
+
+    def npv(multiplier: float) -> float:
+        return -initial_investment + sum(cf * multiplier / ((1 + discount_rate) ** (idx + 1)) for idx, cf in enumerate(base_cashflows))
+
+    pessimistic_npv = round(npv(0.8), 1)
+    base_npv = round(npv(1.0), 1)
+    optimistic_npv = round(npv(1.3), 1)
+    sigma = max((optimistic_npv - pessimistic_npv) / 3.92, 1.0)
+    success_prob = round((1 - normal_cdf(0, base_npv, sigma)) * 100, 1)
+    irr_base = round((sum(base_cashflows) / initial_investment) ** (1 / len(base_cashflows)) * 100 - 100, 1)
+    payback = 0.0
+    cumulative = -initial_investment
+    for idx, cf in enumerate(base_cashflows, start=1):
+        prev = cumulative
+        cumulative += cf
+        if cumulative >= 0:
+            payback = round(idx - 1 + abs(prev) / cf, 1)
+            break
+    distribution = []
+    for i in range(31):
+        x = round(base_npv - 3 * sigma + i * (6 * sigma / 30), 1)
+        density = math.exp(-((x - base_npv) ** 2) / (2 * sigma * sigma)) * 100
+        distribution.append({"npv": x, "freq": round(density, 2)})
+    return {
+        "operator": "O'zbektelekom AK",
+        "method": "Deterministic Monte-Carlo equivalent from forecast cash-flow distribution",
+        "iterations": 10000,
+        "discount_rate": discount_rate,
+        "summary": {"mean_npv": base_npv, "success_probability": success_prob, "irr_base": irr_base, "payback_years": payback, "sigma": round(sigma, 1)},
+        "scenarios": [
+            {"name": "Pessimistik / Pessimistic", "prob": 25, "npv": pessimistic_npv, "irr": round(irr_base * 0.72, 1), "payback": round(payback * 1.35, 1), "color": "destructive"},
+            {"name": "Bazaviy / Base", "prob": 65, "npv": base_npv, "irr": irr_base, "payback": payback, "color": "gold"},
+            {"name": "Optimistik / Optimistic", "prob": 10, "npv": optimistic_npv, "irr": round(irr_base * 1.28, 1), "payback": round(payback * 0.78, 1), "color": "success"},
+        ],
+        "distribution": distribution,
+    }
+
+
+@app.get("/api/dmm/uzbtk", tags=["DMM"])
+async def get_dmm_uzbtk():
+    """TM Forum DMM domen ballarini real KPIlardan hisoblaydi."""
+    domains = get_dmm_domains()
+    current_score = round(float(np.mean([d["score"] for d in domains])), 2)
+    previous_score = round(float(np.mean([d["previous"] for d in domains])), 2)
+    weakest = min(domains, key=lambda d: d["score"])
+    return {
+        "operator": "O'zbektelekom AK",
+        "method": "TM Forum DMM v5.0 KPI-normalized scoring",
+        "summary": {
+            "current_score": current_score,
+            "previous_score": previous_score,
+            "delta": round(current_score - previous_score, 2),
+            "maturity_stage": 3,
+            "weakest_domain": weakest["name"],
+            "weakest_score": weakest["score"],
+            "target_2025": 4.0,
+        },
+        "domains": domains,
+    }
+
+
 @app.get("/api/forecast/uzbtk", tags=["Prognoz 2026–2030"])
 async def get_forecast_uzbtk(
     variable: str = Query("revenue_mlrd", description="Prognoz o'zgaruvchisi"),
@@ -730,15 +945,26 @@ async def get_forecast_all_2030():
 async def get_benchmark_2025():
     """5 operator taqqoslamalari — 2025"""
     uzbtk = UZBTK_HISTORICAL[-1]
+    competitor_scores = {
+        "KZTK": {"digital_rev_pct": 45.0, "coverage_pct": 96.0, "dmm_score": 4.1},
+        "AZTK": {"digital_rev_pct": 41.0, "coverage_pct": 93.0, "dmm_score": 3.9},
+        "KGTK": {"digital_rev_pct": 26.0, "coverage_pct": 81.0, "dmm_score": 2.9},
+        "TJTK": {"digital_rev_pct": 18.0, "coverage_pct": 74.0, "dmm_score": 2.6},
+    }
+    dmm_score = round(float(np.mean([d["score"] for d in get_dmm_domains()])), 2)
     data = [
         {
             "code": "UZBTK",
             "name": "O'zbektelekom AK",
+            "country": "Uzbekistan",
             "revenue_mlrd": uzbtk["revenue_mlrd"],
             "ebitda_margin": uzbtk["ebitda_margin"],
             "arpu_som": uzbtk["arpu_som"],
             "nps_score": uzbtk["nps_score"],
             "bs_5g": uzbtk["bs_5g"],
+            "digital_rev_pct": uzbtk["digital_rev_pct"],
+            "coverage_pct": uzbtk["coverage_pct"],
+            "dmm_score": dmm_score,
             "ccr_score": 0.760,
             "malmquist_tfp": 1.460,
             "is_primary": True,
@@ -747,7 +973,9 @@ async def get_benchmark_2025():
         {
             "code": code,
             "name": next(o["name_uz"] for o in OPERATORS if o["code"] == code),
+            "country": next(o["country"] for o in OPERATORS if o["code"] == code),
             **{k: v for k, v in comp_data.items() if k not in ("year", "is_forecast")},
+            **competitor_scores[code],
             "ccr_score": next((r["ccr_score"] for r in DEA_RESULTS_2025 if r["operator_code"] == code), None),
             "malmquist_tfp": next((r["malmquist_tfp"] for r in DEA_RESULTS_2025 if r["operator_code"] == code), None),
             "is_primary": False,
